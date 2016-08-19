@@ -2,55 +2,20 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 import sys
 import datetime
+import dateutil.parser
 import time
-from autobahn.asyncio.wamp import ApplicationSession, ApplicationRunner
-from ssl import SSLContext, CERT_NONE, PROTOCOL_TLSv1_2
 import asyncio
 import requests
 import json
 from multiprocessing import Process, Queue
 from threading import Thread
 import click
+import apiconnect
+from config import config
 
 q = Queue()
 
 BUTTON_STYLESHEET = "padding: 10px; background-color: #effffc; border-style: outset; border-radius: 3px; border-width: 1px; border-color: #afb5b4"
-
-class EventLogger(ApplicationSession):
-
-    def __init__(self, config=None):
-        ApplicationSession.__init__(self, config)
-        self.sub = None
-        self.secret = u'geheim'
-
-
-    def onJoin(self, details):
-        q.put("Eventlogger started")
-        self.sub = self.subscribe(self.relayEvent, 'events')
-
-    def onClose(self, wc):
-        print("closed")
-        asyncio.get_event_loop().stop()
-
-    def relayEvent(*args, **kwargs):
-        print("Event received: {} {}".format(kwargs, args))
-        q.put(kwargs['event'])
-
-def log(message):
-        print("Event received: {}".format(message))
-
-def runWSHandler():
-    context = SSLContext(PROTOCOL_TLSv1_2)
-    context.verify_mode = CERT_NONE
-    runner = ApplicationRunner(url=u"wss://localhost:8080/ws", realm=u"sixpack", ssl=context)
-    runner.run(EventLogger)
-
-def loginRequest():
-    print(json.dumps({'email' : 'admin@admin.com', 'password' : 'adminadmin'}))
-    r = requests.post('https://localhost:8080/login', headers={'content-type' : 'application/json'}, data=json.dumps({'email' : 'admin@admin.com', 'password' : 'adminadmin'}), verify=False)
-    print(r.status_code)
-    print (r.text)
-
 
 class StreepLijst(QObject):
 
@@ -65,21 +30,14 @@ class StreepLijst(QObject):
         super().__init__()
         self.qapp = None
         self.gui = None
-        self.eventHandler = None
         self.authenticated = False
         self.user = None
         self.jwt = None
         self.guiProcess = None
-        self.listening = True
         self.consumptions = []
-        self.users = []
+        self.users = {}
         self.userConsumptions = {}
         self.consumables = {}
-
-        self.eventThread = None
-        self.eventLoop = None
-
-
 
 
 
@@ -89,41 +47,19 @@ class StreepLijst(QObject):
             print("Still running, not restarting")
             return
         self.guiThread = Thread(target=self.startGUI)
-        self.listenerThread = Thread(target=self.startListening)
-        self.eventProcess = Process(target=runWSHandler)
-        #self.eventThread = Thread(target=self.startEventHandler)
-        #self.eventThread.start()
-
         self.guiThread.start()
-        self.eventProcess.start()
-        self.listenerThread.start()
+
 
 
 
     def wait(self):
         self.guiThread.join()
         print('gui done')
-        self.listenerThread.join()
-        print('listener done')
 
     def kill(self):
         print("kill called")
         self.stopGUI()
         print("stopgui called")
-        self.stopListening()
-        print("stoplistening called")
-        self.stopEventHandler()
-        print("stopeventhandler called")
-
-
-    def startEventHandler(self):
-        self.eventLoop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.eventLoop)
-        context = SSLContext(PROTOCOL_TLSv1_2)
-        context.verify_mode = CERT_NONE
-        runner = ApplicationRunner(url=self.ws_url, realm=u"sixpack", ssl=context)
-        runner.run(EventLogger)
-
 
     def startGUI(self):
         self.qapp = QApplication(sys.argv)
@@ -132,7 +68,7 @@ class StreepLijst(QObject):
         self.gui = StreepGui(self, screenWidth, screenHeight)
         #self.gui.setGeometry(1024,768,1024, 768)
 
-        #Connect the signales
+        #Connect the signals
         self.updateConsumptionsSignal.connect(self.gui.loadConsumptions)
         self.updateUsersSignal.connect(self.gui.loadUsers)
         self.updateConsumablesSignal.connect(self.gui.loadConsumables)
@@ -144,104 +80,57 @@ class StreepLijst(QObject):
         self.qapp.exec_()
         print('guiloop returned')
 
-    def startListening(self):
-        print('listening')
-        while self.listening:
-            message = q.get()
-            if message == 'CONSUMPTIONS_UPDATE':
-                print('consumptions update received')
-                self.updateConsumptions()
-        print('listening done')
-
-    def stopListening(self):
-        self.listening = False
-        q.put("stop")
-
-    def stopEventHandler(self):
-        self.eventProcess.terminate()
-
     def stopGUI(self):
         QCoreApplication.instance().quit()
 
-    def login(self, email, password):
-        result = True
-        r = requests.post(self.api_url + '/login', headers={'content-type' : 'application/json'},
-                          data=json.dumps({'email' : email, 'password' : password}), verify=False)
-        if r.status_code == 200:
-            data = r.json()
-            self.user = data['user_id']
-            self.jwt = data['jwt']
-        else:
-            result = False
-        return result
-
     def updateUsers(self):
         result = True
-        try:
-            r = requests.get(self.api_url + '/users', headers={'content-type' : 'application/json', 'bearer' : self.jwt}, verify=False)
-            if r.status_code == 200:
-                data = r.json()
-                self.users = data['users']
-                self.updateUsersSignal.emit()
-
-            else:
-                print("Error during user fetch")
-                result = False
-        except ConnectionError as e:
-            print("Could not connect to server")
+        users = apiconnect.fetchUsers()
+        if (not users is None):
+            self.users = users
+            self.updateUsersSignal.emit()
+        else:
             result = False
-
 
         return result
 
     def updateConsumptions(self):
         result = True
-        try:
-            r = requests.get(self.api_url +'/consumptions', headers={'content-type' : 'application/json', 'bearer' : self.jwt}, verify=False)
-            if r.status_code == 200:
-                data = r.json()
-                #clear out previous consumptions
-                self.consumptions = []
-                self.userConsumptions = {}
-                #Add new consumptions
-                for k, c in data['consumptions'].items():
-                    self.consumptions.append(c)
-                    if str(c['user_id']) in self.users:
-                        if not str(c['user_id']) in self.userConsumptions:
-                            self.userConsumptions[str(c['user_id'])] = []
-                        self.userConsumptions[str(c['user_id'])].append(c)
-                self.consumptions = sorted(self.consumptions, key=lambda con: con['time'], reverse=True)
-                self.updateConsumptionsSignal.emit()
-                #self.gui.loadConsumptions(data['consumptions'])
-            else:
-                print("Error during consumptions fetch")
-                result = False
-        except ConnectionError as e:
-            print("Could not connect to server")
-            result = False
 
+        newConsumptions = apiconnect.fetchConsumptions()
+
+        if not newConsumptions is None:
+            # clear out previous consumptions
+            self.consumptions = []
+            self.userConsumptions = {}
+            # Add new consumptions
+            for k, c in newConsumptions.items():
+                self.consumptions.append(c)
+                if str(c['userId']) in self.users:
+                    if not str(c['userId']) in self.userConsumptions:
+                        self.userConsumptions[str(c['userId'])] = []
+                    self.userConsumptions[str(c['userId'])].append(c)
+            self.consumptions = sorted(self.consumptions, key=lambda con: con['createdAt'], reverse=True)
+            self.updateConsumptionsSignal.emit()
+        else:
+            result = False
 
         return result
 
     def updateConsumables(self):
         result = True
-        try:
-            r = requests.get(self.api_url + '/consumables', headers={'content-type' : 'application/json', 'bearer' : self.jwt}, verify=False)
-            if r.status_code == 200:
-                data = r.json()
-                self.consumables = data['consumables']
-                self.updateConsumablesSignal.emit()
-            else:
-                print("Error during consumables fetch")
-                result = False
-        except ConnectionError as e:
-            print("Could not connect to server")
-            result = False
 
+        newConsumables = apiconnect.fetchConsumables()
+
+        if not newConsumables is None:
+            self.consumables = newConsumables
+            self.updateConsumablesSignal.emit()
+        else:
+            result = False
 
         return result
 
-    def addConsumption(self, user_id, consumable_id, amount):
+    def addConsumption(self, userId, consumableId, name, amount):
         """
 
         :param user_id: integer
@@ -251,52 +140,20 @@ class StreepLijst(QObject):
         """
 
         result = True
-        try:
-            r = requests.post(self.api_url + '/consumptions',
-                              headers={'content-type' : 'application/json', 'bearer' : self.jwt},
-                              data=json.dumps({'user_id' : user_id, 'consumable_id' : consumable_id, 'amount' : amount}),
-                              verify=False)
-            if r.status_code == 200:
-                response = r.json()
-                if response['success'] is True:
-                    self.gui.showMessage("{} {} gestreept!".format(amount, consumable_id))
-                    print('Successfully added consumption')
-                else:
-                    print('Error adding consumption')
-                    print(response)
-
-            else:
-                print("Error adding consumption")
-                result = False
-        except ConnectionError as e:
-            print("Could not connect to server")
+        if apiconnect.createConsumption(userId, consumableId, amount):
+            self.gui.showMessage("{} {} gestreept!".format(amount, name))
+        else:
             result = False
-
 
         return result
 
-    def deleteConsumption(self, consumption_id):
+    def deleteConsumption(self, consumptionId):
         result = True
-        try:
-            r = requests.delete(self.api_url + '/consumptions/' + str(consumption_id),
-                              headers={'content-type' : 'application/json', 'bearer' : self.jwt},
-                              verify=False)
-            if r.status_code == 200:
-                response = r.json()
-                if response['success']is True:
-                    print('Successfully deleted consumption')
-                    self.gui.showMessage('Consumptie verwijderd.')
-                else:
-                    print("Error deleteing consumption")
-                    print(response)
-            else:
-                print("Error deleting consumption")
-                result = False
-        except ConnectionError as e:
-            print("Could not connect to server")
+
+        if apiconnect.deleteConsumption(consumptionId):
+            self.gui.showMessage('Consumptie verwijderd.')
+        else:
             result = False
-
-
         return result
 
 class StreepGui(QWidget):
@@ -339,31 +196,36 @@ class StreepGui(QWidget):
         self.hideConsumptionDialogs()
 
     def loadUsers(self):
-        #Create the user dialogs
+
+        selectedUsers = []
         for id, user in self.controller.users.items():
-            if not id in self.userDialogs:
-                self.userDialogs[str(id)] = ConsumptionDialog(user['name'], str(id), self, parent=self)
-                #self.userDialogs[str(id)].setParent(self)
+            if user['human'] and user['active']:
+                # Create the user dialogs
+                if not id in self.userDialogs:
+                    self.userDialogs[str(id)] = ConsumptionDialog(user['name'], str(id), self, parent=self)
+                    #self.userDialogs[str(id)].setParent(self)
+                #Select users for which consumptions can be added
+                selectedUsers.append(user)
         #Create usergrid
-        self.userGrid = UserGrid([x for k, x in self.controller.users.items()], self.controller)
+        self.userGrid = UserGrid(selectedUsers, self.controller)
         self.tabPane.removeTab(0)
         self.tabPane.insertTab(0, self.userGrid, 'Strepen')
-        #Connect buttons and shit
+
 
     def loadConsumptions(self):
         #Load the consumptions in the user dialogs
         for id, ud in self.userDialogs.items():
             if id in self.controller.userConsumptions:
-                ud.loadConsumptions(self.controller.userConsumptions[id])
+                ud.loadConsumptions(self.controller.userConsumptions[id], self.controller.consumables)
             else:
-                ud.loadConsumptions([])
+                ud.loadConsumptions([], self.controller.consumables)
 
     def showMessage(self, message):
         self.statusbar.showMessage(message, 3000)
 
     def loadConsumables(self):
         for id, ud in self.userDialogs.items():
-            ud.loadConsumables([x['id'] for k, x in self.controller.consumables.items()])
+            ud.loadConsumables(self.controller.consumables)
 
     def showConsumptionDialog(self, user_id):
         for id, ud in self.userDialogs.items():
@@ -409,6 +271,7 @@ class UserGrid(QWidget):
 
     def onClick(self):
         source = self.sender()
+        self.controller.updateConsumptions()
         self.controller.gui.showConsumptionDialog(source.user_id)
 
 
@@ -490,18 +353,20 @@ class ConsumptionDialog(QDialog):
         #Set dialog size to 80% of screen size
         self.setGeometry(int(self.gui.screenWidth * 0.1),int(self.gui.screenHeight * 0.1), int(self.gui.screenWidth * 0.8), int(self.gui.screenHeight*0.8))
 
-    def loadConsumables(self, consumable_ids):
+    def loadConsumables(self, consumables):
         #Add buttons for the consumables
         self.consumableButtonsGroup.setParent(None) #This removes the widget
         self.consumableButtons = {}
         self.consumableButtonsGroup = QWidget()
         self.buttonsLayout = QHBoxLayout()
-        for c in consumable_ids:
-            b = QPushButton(c)
+        for k, c in consumables.items():
+            print(c)
+            b = QPushButton(c['name'])
+            b.consumableId = c['id']
             b.setStyleSheet(BUTTON_STYLESHEET)
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(self.onConsumableClick)
-            self.consumableButtons[c] = b
+            self.consumableButtons[c['id']] = b
             self.buttonsLayout.addWidget(b)
         self.buttonsLayout.addStretch(1)
         self.consumableButtonsGroup.setLayout(self.buttonsLayout)
@@ -511,14 +376,14 @@ class ConsumptionDialog(QDialog):
         #Repaint
         self.repaint()
 
-    def loadConsumptions(self, consumptions):
+    def loadConsumptions(self, consumptions, consumables):
         #Add latest consumptions
         #self.topLayout.removeWidget(self.consumptionList)
         self.consumptionList.setParent(None)
         self.consumptionList = QWidget()
         self.consumptionLayout = QVBoxLayout()
         #Sort the consumptions
-        sorted_consumptions = sorted(consumptions, key=lambda con: con['time'], reverse=True)
+        sorted_consumptions = sorted(consumptions, key=lambda con: con['createdAt'], reverse=True)
         #Select the top four consumptions
         sorted_consumptions = sorted_consumptions[:3]
 
@@ -526,8 +391,8 @@ class ConsumptionDialog(QDialog):
             cw = QWidget()
             cl = QHBoxLayout()
             cl.setSpacing(20)
-            time = datetime.datetime.fromtimestamp(c['time'])
-            cl.addWidget(QLabel("{} {} op {}".format(c['amount'], c['consumable_id'], time.strftime("%a %d %B om %X"))))
+            time = dateutil.parser.parse(c['createdAt'])
+            cl.addWidget(QLabel("{} {} op {}".format(c['amount'], consumables[c['consumableId']]['name'], time.strftime("%a %d %B om %X"))))
             dl = DeleteButton(c['id'])
             dl.setStyleSheet(BUTTON_STYLESHEET)
             dl.setFocusPolicy(Qt.NoFocus)
@@ -547,7 +412,8 @@ class ConsumptionDialog(QDialog):
     def onConsumableClick(self):
         print('onConsumableClick')
         source = self.sender()
-        self.gui.controller.addConsumption(int(self.user_id), source.text(), self.amount)
+        #TODO check if source.consumableId exists
+        self.gui.controller.addConsumption(int(self.user_id), source.consumableId, source.text(), self.amount)
 
     def onDeleteClick(self):
         print('onDeleteClick')
@@ -568,11 +434,6 @@ def cli():
 @click.option('--ws_url', default='wss://localhost:8080/ws')
 def run(api_url, ws_url, email, password):
     s = StreepLijst()
-    s.api_url = api_url
-    s.ws_url = ws_url
-    if not s.login('admin@admin.com', 'adminadmin'):
-        print('Login failed. Exiting...')
-        return
     s.start()
     try:
         s.wait()
