@@ -13,15 +13,33 @@ import click
 import apiconnect
 from config import config
 
+
+sixpackAvailable = True
+relaisAvailable = True
+
+#Importing the relaisconnector may not work if not run on a Raspberry Pi, hence the try catch
+try:
+    import relaisconnect
+except ImportError:
+    print('Could not load relaisconnector.py. Power controls will be unavailable')
+    relaisAvailable = False
+
+#Check if the API connection is available
+if apiconnect.fetchCurrentUser() is None:
+    print('Could not connect to the Sixpack API. Consumptions management will be unavailable.')
+    sixpackAvailable = False
+
+
 q = Queue()
 
 BUTTON_STYLESHEET = "padding: 10px; background-color: #effffc; border-style: outset; border-radius: 3px; border-width: 1px; border-color: #afb5b4"
 
-class StreepLijst(QObject):
+class GUIController(QObject):
 
     updateConsumptionsSignal = pyqtSignal()
     updateUsersSignal = pyqtSignal()
     updateConsumablesSignal = pyqtSignal()
+    updateDevicesSignal = pyqtSignal()
 
     api_url = "https://localhost:8080"
     ws_url = "wss://localhost:8080/ws"
@@ -34,6 +52,9 @@ class StreepLijst(QObject):
         self.user = None
         self.jwt = None
         self.guiProcess = None
+        #Devices for which the status will be queries via relaisconnect
+        self.selectedDevices = [('amp', 'Versterker'), ('mixer', 'Mixer')]
+        self.devices = []
         self.consumptions = []
         self.users = {}
         self.userConsumptions = {}
@@ -65,17 +86,26 @@ class StreepLijst(QObject):
         self.qapp = QApplication(sys.argv)
         screenWidth = self.qapp.desktop().screenGeometry().width()
         screenHeight = self.qapp.desktop().screenGeometry().height()
-        self.gui = StreepGui(self, screenWidth, screenHeight)
+        self.gui = TouchGui(self, screenWidth, screenHeight)
         #self.gui.setGeometry(1024,768,1024, 768)
 
-        #Connect the signals
-        self.updateConsumptionsSignal.connect(self.gui.loadConsumptions)
-        self.updateUsersSignal.connect(self.gui.loadUsers)
-        self.updateConsumablesSignal.connect(self.gui.loadConsumables)
+        #Only load the consumptions part if the API is available
+        if sixpackAvailable:
+            #Connect the signals
+            self.updateConsumptionsSignal.connect(self.gui.loadConsumptions)
+            self.updateUsersSignal.connect(self.gui.loadUsers)
+            self.updateConsumablesSignal.connect(self.gui.loadConsumables)
 
-        self.updateUsers()
-        self.updateConsumables()
-        self.updateConsumptions()
+            self.updateUsers()
+            self.updateConsumables()
+            self.updateConsumptions()
+
+        if relaisAvailable:
+            self.updateDevicesSignal.connect(self.gui.loadDevices)
+            self.gui.loadPowerTab()
+
+            self.updateDevices()
+
         self.gui.show()
         self.qapp.exec_()
         print('guiloop returned')
@@ -156,24 +186,36 @@ class StreepLijst(QObject):
             result = False
         return result
 
-class StreepGui(QWidget):
+    def updateDevices(self):
+        newDevices = []
+        for d in self.selectedDevices:
+            newDevices.append((d[0], d[1], relaisconnect.getStateByLabel(d[0])))
+        self.devices = newDevices
 
-    def __init__(self, controller, screenWidth, screenHeight):
+class TouchGui(QWidget):
+
+    def __init__(self, controller, screenWidth, screenHeight, sixpackAvailable, relaisAvailable):
         super().__init__()
         self.controller = controller
         self.screenWidth = screenWidth
         self.screenHeight = screenHeight
+        #UserGrid component
+        self.userGrid = None
+        #Devices component
+        self.powerTab = None
+
+        #Layout of the home screen
+        self.mainLayout = QVBoxLayout()
+        self.mainLayout.addWidget(self.tabPane)
+        #Tabbed panel
         self.tabPane= QTabWidget()
         self.tabPane.setFocusPolicy(Qt.NoFocus)
-        self.userGrid = None
-        #self.tabPane.addTab(self.userGrid, 'Strepen')
-        self.tabLayout1 = QVBoxLayout()
-        self.tabLayout1.addWidget(self.tabPane)
-
         #Statusbar
         self.statusbar = QStatusBar()
-        self.tabLayout1.addWidget(self.statusbar)
-        self.setLayout(self.tabLayout1)
+        self.mainLayout.addWidget(self.statusbar)
+        #Set the main layout as the current layout
+        self.setLayout(self.mainLayout)
+
         self.users = {}
         self.userDialogs = {}
         self.userConsumptions = {}
@@ -191,12 +233,24 @@ class StreepGui(QWidget):
                 self.showFullScreen()
         elif e.key() == Qt.Key_Escape:
             self.controller.kill()
+        elif e.key() == Qt.Key_Q:
+            self.controller.kill()
 
     def mousePressEvent(self, e):
         self.hideConsumptionDialogs()
 
-    def loadUsers(self):
+    #Loads the devices tab
+    def loadPowerTab(self):
+        self.tabPane.removeTab(1)
+        self.powerTab = PowerTab(self.controller)
+        self.tabPane.insertTab(1, self.powerTab, 'Apparaten')
 
+    #Loads the device statuses in the devices tab
+    def loadDevices(self):
+        self.powerTab.loadStatusLabels()
+
+    def loadUsers(self):
+        #Load the users tab
         selectedUsers = []
         for id, user in self.controller.users.items():
             if user['human'] and user['active']:
@@ -224,6 +278,7 @@ class StreepGui(QWidget):
         self.statusbar.showMessage(message, 3000)
 
     def loadConsumables(self):
+        #Load available consumables in UserDialogs
         for id, ud in self.userDialogs.items():
             ud.loadConsumables(self.controller.consumables)
 
@@ -245,6 +300,54 @@ class StreepGui(QWidget):
         print("going down")
         #QCoreApplication.instance().quit()
         self.controller.kill()
+
+class PowerTab(QWidget):
+    def __init__(self, controller):
+        super().__init__()
+        self.gridLayout = None
+        self.controller = controller
+        self.labelsGroup = None
+        self.initUI()
+
+    def initUI(self):
+        self.gridLayout = QGridLayout()
+        self.labelsGroup = QWidget()
+        #Add button to turn on/off mixer and amp
+        b = QPushButton('Audio apparaten aan')
+        b.clicked.connect(self.onMixerAmpClick)
+        self.gridLayout.addWidget(b, 0, 1)
+        #Add the button on position 0, 1
+
+
+
+    def loadStatusLabels(self):
+        """
+        Load labels for the power status of each device
+        :return:
+        """
+        #Remove the previous labels
+        self.labelsGroup.setParent(None)
+        #Create a new labels group
+        self.labelsGroup = QWidget()
+        layout = QHBoxLayout()
+        for device in self.controller.devices:
+            #Device is a 3-tuple (id, name, status)
+            layout.addWidget(QLabel('{} is {}'.format(device[1], 'aan' if device[2] else 'uit')))
+        #Add the layout to the widget
+        self.labelsGroup.setLayout(layout)
+        #Add the widget to the grid on position 0,0
+        self.gridLayout.addWidget(self.labelsGroup, 0, 0)
+
+    def onDeviceClick(self):
+        pass
+
+    def onMixerAmpClick(self):
+        self.controller.audioDevicesToggle()
+
+class PowerButton(QPushButton):
+    def __init__(self, device_label, name):
+        super().__init__(name)
+        self.device_label = str(device_label)
 
 class UserGrid(QWidget):
     def __init__(self, users, controller):
@@ -433,7 +536,7 @@ def cli():
 @click.option('--api_url', default='https://localhost:8080')
 @click.option('--ws_url', default='wss://localhost:8080/ws')
 def run(api_url, ws_url, email, password):
-    s = StreepLijst()
+    s = GUIController()
     s.start()
     try:
         s.wait()
