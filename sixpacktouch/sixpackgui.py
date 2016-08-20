@@ -20,15 +20,19 @@ relaisAvailable = True
 #Importing the relaisconnector may not work if not run on a Raspberry Pi, hence the try catch
 try:
     import relaisconnect
+    relaisconnect.setOutput()
 except ImportError:
-    print('Could not load relaisconnector.py. Power controls will be unavailable')
+    print('Could not load relaisconnect.py. Power controls will be unavailable')
     relaisAvailable = False
 
 #Check if the API connection is available
-if apiconnect.fetchCurrentUser() is None:
-    print('Could not connect to the Sixpack API. Consumptions management will be unavailable.')
+try:
+    if apiconnect.fetchCurrentUser() is None:
+        print('Could not connect to the Sixpack API. Consumptions management will be unavailable.')
+        sixpackAvailable = False
+except:
+    print('Coudl not connect to Sixpack API')
     sixpackAvailable = False
-
 
 q = Queue()
 
@@ -61,8 +65,6 @@ class GUIController(QObject):
         self.consumables = {}
 
 
-
-
     def start(self):
         if not(self.guiProcess is None or self.eventProcess is None):
             print("Still running, not restarting")
@@ -83,10 +85,12 @@ class GUIController(QObject):
         print("stopgui called")
 
     def startGUI(self):
+        global sixpackAvailable
+        global relaisAvailable
         self.qapp = QApplication(sys.argv)
         screenWidth = self.qapp.desktop().screenGeometry().width()
         screenHeight = self.qapp.desktop().screenGeometry().height()
-        self.gui = TouchGui(self, screenWidth, screenHeight)
+        self.gui = TouchGui(self, screenWidth, screenHeight, sixpackAvailable, relaisAvailable)
         #self.gui.setGeometry(1024,768,1024, 768)
 
         #Only load the consumptions part if the API is available
@@ -191,6 +195,21 @@ class GUIController(QObject):
         for d in self.selectedDevices:
             newDevices.append((d[0], d[1], relaisconnect.getStateByLabel(d[0])))
         self.devices = newDevices
+        self.updateDevicesSignal.emit()
+
+    def audioDevicesToggle(self):
+        print('audioDevicesToggle called')
+        if relaisconnect.getStateByLabel('amp') == 0  and relaisconnect.getStateByLabel('mixer') == 0:
+            print('enable audio devices')
+            relaisconnect.enableAudioDevices()
+        elif relaisconnect.getStateByLabel('amp') == 0 or relaisconnect.getStateByLabel('mixer') == 0:
+            print('disable audio devices')
+            relaisconnect.disableAudioDevices()
+        else:
+            #Both are on so disable
+            print('disable audio devices')
+            relaisconnect.disableAudioDevices()
+        self.updateDevices()
 
 class TouchGui(QWidget):
 
@@ -206,10 +225,10 @@ class TouchGui(QWidget):
 
         #Layout of the home screen
         self.mainLayout = QVBoxLayout()
-        self.mainLayout.addWidget(self.tabPane)
         #Tabbed panel
         self.tabPane= QTabWidget()
         self.tabPane.setFocusPolicy(Qt.NoFocus)
+        self.mainLayout.addWidget(self.tabPane)
         #Statusbar
         self.statusbar = QStatusBar()
         self.mainLayout.addWidget(self.statusbar)
@@ -247,6 +266,7 @@ class TouchGui(QWidget):
 
     #Loads the device statuses in the devices tab
     def loadDevices(self):
+        print('loadDevices called')
         self.powerTab.loadStatusLabels()
 
     def loadUsers(self):
@@ -310,14 +330,14 @@ class PowerTab(QWidget):
         self.initUI()
 
     def initUI(self):
-        self.gridLayout = QGridLayout()
+        self.gridLayout = QVBoxLayout()
         self.labelsGroup = QWidget()
         #Add button to turn on/off mixer and amp
-        b = QPushButton('Audio apparaten aan')
+        b = QPushButton('Audio apparaten')
         b.clicked.connect(self.onMixerAmpClick)
-        self.gridLayout.addWidget(b, 0, 1)
+        self.gridLayout.addWidget(b)
         #Add the button on position 0, 1
-
+        self.setLayout(self.gridLayout)        
 
 
     def loadStatusLabels(self):
@@ -336,7 +356,7 @@ class PowerTab(QWidget):
         #Add the layout to the widget
         self.labelsGroup.setLayout(layout)
         #Add the widget to the grid on position 0,0
-        self.gridLayout.addWidget(self.labelsGroup, 0, 0)
+        self.gridLayout.addWidget(self.labelsGroup)
 
     def onDeviceClick(self):
         pass
