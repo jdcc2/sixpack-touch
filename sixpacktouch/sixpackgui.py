@@ -509,13 +509,14 @@ class ConsumptionDialog(QDialog):
         sorted_consumptions = sorted(consumptions, key=lambda con: con['createdAt'], reverse=True)
         #Select the top four consumptions
         sorted_consumptions = sorted_consumptions[:3]
-
+        print(consumptions)
+        print(consumables)
         for c in sorted_consumptions:
             cw = QWidget()
             cl = QHBoxLayout()
             cl.setSpacing(20)
             time = dateutil.parser.parse(c['createdAt'])
-            cl.addWidget(QLabel("{} {} op {}".format(c['amount'], consumables[c['consumableId']]['name'], time.strftime("%a %d %B om %X"))))
+            cl.addWidget(QLabel("{} {} op {}".format(c['amount'], consumables[str(c['consumableId'])]['name'], time.strftime("%a %d %B om %X"))))
             dl = DeleteButton(c['id'])
             dl.setStyleSheet(BUTTON_STYLESHEET)
             dl.setFocusPolicy(Qt.NoFocus)
@@ -537,6 +538,7 @@ class ConsumptionDialog(QDialog):
         source = self.sender()
         #TODO check if source.consumableId exists
         self.gui.controller.addConsumption(int(self.user_id), source.consumableId, source.text(), self.amount)
+        self.gui.controller.updateConsumptions()
 
     def onDeleteClick(self):
         print('onDeleteClick')

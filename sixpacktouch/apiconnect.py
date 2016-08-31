@@ -66,6 +66,7 @@ def createConsumption(userId, consumableId, amount):
                 result = False
         else:
             print("Error adding consumption")
+            print(r.json())
             result = False
     except ConnectionError as e:
         print("Could not connect to server")
