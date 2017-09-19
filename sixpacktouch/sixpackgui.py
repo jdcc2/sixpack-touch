@@ -4,7 +4,6 @@ import sys
 import datetime
 import dateutil.parser
 import time
-import asyncio
 import requests
 import json
 from multiprocessing import Process, Queue
